@@ -38,12 +38,14 @@ US_STATE_NAME = re.compile(r"alabama|alaska|arizona|arkansas|california|colorado
                            r"north carolina|north dakota|ohio|oklahoma|oregon|pennsylvania|rhode island|south carolina|"
                            r"south dakota|tennessee|texas|utah|vermont|virginia|wisconsin|wyoming", re.I)
 CA_PROVINCE = re.compile(r"\b(ON|BC|QC|AB)\b")  # case-sensitive, so "On-site" isn't Ontario
-NON_US = re.compile(r"canada|toronto|vancouver|montreal|waterloo|ottawa|calgary|edmonton|ontario|british columbia|"
-                    r"london|united kingdom|\buk\b|ireland|dublin|germany|berlin|munich|"
-                    r"france|paris|netherlands|amsterdam|switzerland|zurich|zug|spain|madrid|poland|serbia|romania|bucharest|"
-                    r"india|bangalore|bengaluru|hyderabad|gurgaon|singapore|hong kong|china|shanghai|japan|tokyo|korea|"
-                    r"seoul|australia|sydney|israel|tel aviv|mexico|brazil|qatar|doha|costa rica|argentina|colombia|chile|taiwan|"
-                    r"vietnam|philippines|malaysia|penang|czech|prague|portugal|lisbon|italy|milan|sweden|denmark|finland", re.I)
+# Countries always mean non-US; foreign cities lose to a US state code ("Dublin, OH", "London, KY").
+NON_US_COUNTRY = re.compile(r"\b(canada|ontario|british columbia|united kingdom|uk|england|scotland|ireland|germany|france|"
+                            r"netherlands|switzerland|spain|poland|serbia|romania|india|singapore|hong kong|china|japan|korea|"
+                            r"australia|israel|mexico|brazil|qatar|costa rica|argentina|colombia|chile|taiwan|vietnam|"
+                            r"philippines|malaysia|czech republic|czechia|portugal|italy|sweden|denmark|finland)\b", re.I)
+NON_US_CITY = re.compile(r"\b(toronto|vancouver|montreal|waterloo|ottawa|calgary|edmonton|london|dublin|berlin|munich|paris|"
+                         r"amsterdam|zurich|zug|madrid|bucharest|bangalore|bengaluru|hyderabad|gurgaon|shanghai|tokyo|seoul|"
+                         r"sydney|tel aviv|doha|penang|prague|lisbon|milan)\b", re.I)
 BLOCKERS = re.compile(r"(unable|not able|will not|won.t|cannot|can.t|do(es)? not)\s+(to\s+)?(provide\s+|offer\s+)?"
                       r"(visa\s+|immigration\s+)?sponsor|without (the need for )?(current or future |now or in the future )?"
                       r"(visa |employment |immigration )?sponsorship|u\.?s\.? citizen(ship)?\s+(is\s+)?required|"
@@ -64,9 +66,13 @@ def strip(s):
 
 def is_us(place):
     """One location ("Austin, TX", "Remote - India"). Workday's "2 Locations" is handled by the caller."""
-    if NON_US.search(place) or CA_PROVINCE.search(place):
+    if NON_US_COUNTRY.search(place) or CA_PROVINCE.search(place):
         return False
-    return bool(US_STRONG.search(place) or US_STATE.search(place) or US_STATE_NAME.search(place) or re.search(r"remote|virtual", place, re.I))
+    if US_STATE.search(place) or re.search(r"united states|\busa?\b", place, re.I):
+        return True
+    if NON_US_CITY.search(place):
+        return False
+    return bool(US_STRONG.search(place) or US_STATE_NAME.search(place) or re.search(r"remote|virtual", place, re.I))
 
 
 def verdict(title, location, description=""):
@@ -215,8 +221,10 @@ if __name__ == "__main__":
         assert verdict("SWE Intern", "New York, NY; London, UK") == ""
         assert verdict("SWE Intern", "Costa Rica, San Jose") == "location"
         assert verdict("SWE Intern", "2 Locations") == ""
+        for place in ("Dublin, Ireland", "London, ON, CA", "Bengaluru, KA, India", "Remote - London", "Toronto, ON, Canada"):
+            assert verdict("SWE Intern", place) == "location", place
         assert verdict("SWE Intern", "Virtual US") == ""
-        for place in ("Lincoln, NE", "St. Louis, MO", "California", "SF", "LA", "Tulsa, OK"):
+        for place in ("Indianapolis, IN", "Dublin, OH", "London, KY", "Vancouver, WA", "Lincoln, NE", "St. Louis, MO", "California", "SF", "LA", "Tulsa, OK"):
             assert verdict("SWE Intern", place) == "", place
         assert verdict("Software Engineer Intern (Bachelor's/Master's)", "Seattle, WA") == ""
         assert key("RTX", "Software Engineering Intern", "Melbourne, FL") == key("RTX", "Software Engineer Intern", "Melbourne, FL")
