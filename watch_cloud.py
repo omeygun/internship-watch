@@ -3,7 +3,7 @@
 Sources: SimplifyJobs + vanshb03 community lists (thousands of companies, with a sponsorship field), Greenhouse /
 Lever / Ashby / SmartRecruiters boards and Workday tenants listed in boards.txt. New technical US internships that
 don't rule out sponsorship are pushed to ntfy (topic from the NTFY_TOPIC secret). State: seen.json.
-First run seeds seen.json silently so you aren't flooded.   Self-check: python watch_cloud.py --test
+Each source's first fetch seeds seen.json silently so you aren't flooded.   Self-check: python watch_cloud.py --test
 """
 import html
 import json
@@ -11,6 +11,7 @@ import os
 import re
 import sys
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -23,21 +24,30 @@ TITLE_OK = re.compile(r"\bintern(ship)?\b|co-?op", re.I)
 TECH = re.compile(r"software|\bswe\b|engineer|developer|programmer|\bdata\b|machine learning|\bml\b|\bai\b|artificial intelligence|"
                   r"back.?end|full.?stack|front.?end|infrastructure|platform|cloud|devops|\bsre\b|reliability|systems|"
                   r"security|computational|quantitative develop|quant dev", re.I)
-TITLE_BAD = re.compile(r"\bph\.?d\b|high school|winter|fall 20\d\d|spring 20\d\d|\bmba\b|master.?s|graduate intern|micro-intern|"
+TITLE_BAD = re.compile(r"\bph\.?d\b|high school|winter|fall 20\d\d|spring 20\d\d|\bmba\b|graduate intern|micro-intern|"
                        r"mechanical|civil|chemical|electrical|hardware|asic|fpga|analog|\bic design|manufacturing|"
                        r"architectural|hvac|firmware|marketing|accounting|audit|finance|legal|recruit", re.I)
-US_STRONG = re.compile(r"united states|\busa\b|\bus\b|remote|new york|nyc|san francisco|bay area|seattle|chicago|austin|boston|"
+US_STRONG = re.compile(r"united states|\busa\b|\bus\b|new york|nyc|san francisco|bay area|seattle|chicago|austin|boston|"
                        r"los angeles|mountain view|palo alto|menlo park|san jose|sunnyvale|denver|atlanta|miami|santa clara|"
                        r"redmond|pittsburgh|washington", re.I)
-US_STATE = re.compile(r"\b(AL|AZ|CA|CO|CT|DC|FL|GA|IL|IN|MA|MD|MI|MN|NC|NJ|NY|OH|OR|PA|TX|UT|VA|WA|WI)\b")
-NON_US = re.compile(r"canada|toronto|vancouver|montreal|london|united kingdom|\buk\b|ireland|dublin|germany|berlin|munich|"
+US_STATE = re.compile(r"\b(AL|AK|AZ|AR|CA|CO|CT|DC|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|"
+                      r"NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|SF|NYC)\b")  # case-sensitive; LA = Louisiana or Los Angeles
+US_STATE_NAME = re.compile(r"alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|florida|georgia|hawaii|"
+                           r"idaho|illinois|indiana|iowa|kansas|kentucky|louisiana|maine|maryland|massachusetts|michigan|"
+                           r"minnesota|mississippi|missouri|montana|nebraska|nevada|new hampshire|new jersey|new mexico|"
+                           r"north carolina|north dakota|ohio|oklahoma|oregon|pennsylvania|rhode island|south carolina|"
+                           r"south dakota|tennessee|texas|utah|vermont|virginia|wisconsin|wyoming", re.I)
+CA_PROVINCE = re.compile(r"\b(ON|BC|QC|AB)\b")  # case-sensitive, so "On-site" isn't Ontario
+NON_US = re.compile(r"canada|toronto|vancouver|montreal|waterloo|ottawa|calgary|edmonton|ontario|british columbia|"
+                    r"london|united kingdom|\buk\b|ireland|dublin|germany|berlin|munich|"
                     r"france|paris|netherlands|amsterdam|switzerland|zurich|zug|spain|madrid|poland|serbia|romania|bucharest|"
                     r"india|bangalore|bengaluru|hyderabad|gurgaon|singapore|hong kong|china|shanghai|japan|tokyo|korea|"
-                    r"seoul|australia|sydney|israel|tel aviv|mexico|brazil|qatar|doha", re.I)
+                    r"seoul|australia|sydney|israel|tel aviv|mexico|brazil|qatar|doha|costa rica|argentina|colombia|chile|taiwan|"
+                    r"vietnam|philippines|malaysia|penang|czech|prague|portugal|lisbon|italy|milan|sweden|denmark|finland", re.I)
 BLOCKERS = re.compile(r"(unable|not able|will not|won.t|cannot|can.t|do(es)? not)\s+(to\s+)?(provide\s+|offer\s+)?"
                       r"(visa\s+|immigration\s+)?sponsor|without (the need for )?(current or future |now or in the future )?"
                       r"(visa |employment |immigration )?sponsorship|u\.?s\.? citizen(ship)?\s+(is\s+)?required|"
-                      r"must be a u\.?s\.? citizen|security clearance|\bu\.?s\.? persons?\b|itar", re.I)
+                      r"must be a u\.?s\.? citizen|(?<!no )security clearance|\bu\.?s\.? persons?\b|\bitar\b", re.I)
 
 
 def get(url, data=None):
@@ -52,30 +62,42 @@ def strip(s):
     return re.sub(r"<[^>]+>", " ", html.unescape(s or ""))
 
 
+def is_us(place):
+    """One location ("Austin, TX", "Remote - India"). Workday's "2 Locations" is handled by the caller."""
+    if NON_US.search(place) or CA_PROVINCE.search(place):
+        return False
+    return bool(US_STRONG.search(place) or US_STATE.search(place) or US_STATE_NAME.search(place) or re.search(r"remote|virtual", place, re.I))
+
+
 def verdict(title, location, description=""):
     """'' if worth alerting, else the reason it's dropped."""
     if not TITLE_OK.search(title) or not TECH.search(title) or TITLE_BAD.search(title):
         return "title"
-    if location.strip() and not (US_STRONG.search(location) or (US_STATE.search(location) and not NON_US.search(location))):
+    if location.strip() and not re.fullmatch(r"\s*\d+ locations\s*", location, re.I) and not any(map(is_us, location.split(";"))):
         return "location"
     if BLOCKERS.search(description):
         return "sponsorship"
     return ""
 
 
+def key(company, title, location):
+    """Same role reposted under a new requisition (RTX does this) gets a new URL but the same key."""
+    t = re.sub(r"[^a-z0-9]+", " ", title.lower()).replace("engineering", "engineer").strip()
+    return f"job:{company.lower()}|{t}|{location.lower()}"
+
+
 # ---------- sources: each yields (url, company, title, location, description) ----------
 
-def community_lists():
-    for src in LISTS:
-        for j in get(src):
-            if not (j.get("active") and j.get("is_visible", True)):
-                continue
-            if j.get("sponsorship") in ("Does Not Offer Sponsorship", "U.S. Citizenship is Required"):
-                continue
-            terms = " ".join(j.get("terms") or [j.get("season") or ""])
-            if terms and "summer" not in terms.lower():
-                continue
-            yield j["url"], j.get("company_name", ""), j.get("title", ""), "; ".join(j.get("locations") or []), ""
+def community_list(src):
+    for j in get(src):
+        if not (j.get("active") and j.get("is_visible", True)):
+            continue
+        if j.get("sponsorship") in ("Does Not Offer Sponsorship", "U.S. Citizenship is Required"):
+            continue
+        terms = " ".join(j.get("terms") or [j.get("season") or ""])
+        if terms and "summer" not in terms.lower():
+            continue
+        yield j["url"], j.get("company_name", ""), j.get("title", ""), "; ".join(j.get("locations") or []), ""
 
 
 def board(ats, token):
@@ -99,9 +121,18 @@ def board(ats, token):
     elif ats == "workday":  # token = "tenant/wdN/site"
         tenant, wd, site = token.split("/")
         base = f"https://{tenant}.{wd}.myworkdayjobs.com"
-        d = get(f"{base}/wday/cxs/{tenant}/{site}/jobs", {"appliedFacets": {}, "limit": 20, "offset": 0, "searchText": "intern"})
-        for j in d.get("jobPostings", []):
-            yield f"{base}/en-US/{site}{j['externalPath']}", tenant, j["title"], j.get("locationsText", ""), ""
+        offset, total = 0, 1
+        while offset < min(total, 200):  # Workday caps pages at 20 and only reports total on the first page
+            d = get(f"{base}/wday/cxs/{tenant}/{site}/jobs",
+                    {"appliedFacets": {}, "limit": 20, "offset": offset, "searchText": "intern"})
+            jobs = d.get("jobPostings", [])
+            if offset == 0:
+                total = d.get("total", 0)
+            if not jobs:
+                break
+            for j in jobs:
+                yield f"{base}/en-US/{site}{j['externalPath']}", tenant, j["title"], j.get("locationsText", ""), ""
+            offset += 20
 
 
 def boards():
@@ -110,45 +141,60 @@ def boards():
 
 
 def push(title, body, click=""):
+    """True if sent (or no topic configured). Never raises, so one bad alert can't wedge the run."""
     topic = os.environ.get("NTFY_TOPIC", "")
     if not topic:
         print(f"(no NTFY_TOPIC) {title}: {body}")
-        return
+        return True
     headers = {"Title": title.encode("ascii", "ignore").decode(), "Tags": "briefcase"}
     if click:
-        headers["Click"] = click
-    req = urllib.request.Request(f"https://ntfy.sh/{topic}", data=body.encode(), headers=headers, method="POST")
-    urllib.request.urlopen(req, timeout=20)
+        headers["Click"] = urllib.parse.quote(click, safe=":/?#[]@!$&'()*+,;=%~")  # headers must be latin-1
+    try:
+        req = urllib.request.Request(f"https://ntfy.sh/{topic}", data=body.encode(), headers=headers, method="POST")
+        urllib.request.urlopen(req, timeout=20)
+        return True
+    except Exception as e:
+        print(f"  push failed ({title}): {str(e)[:80]}")
+        return False
 
 
 def main():
     seen = set(json.loads(SEEN.read_text())) if SEEN.exists() else set()
-    first_run = not seen
-    new, errors = [], []
-    sources = [("lists", community_lists)] + [(f"{a}:{t}", (lambda a=a, t=t: board(a, t))) for a, t in boards()]
+    new, errors, seeded_now = [], [], []
+    sources = ([(f"list:{u}", (lambda u=u: community_list(u))) for u in LISTS] +
+               [(f"{a}:{t}", (lambda a=a, t=t: board(a, t))) for a, t in boards()])
     for name, fetch in sources:
+        # A source's first successful fetch seeds silently, so a new boards.txt line doesn't flood you.
+        seeded = f"src:{name}" in seen
         try:
             for url, company, title, location, desc in fetch():
-                if url in seen:
+                k = key(company, title, location)
+                if url in seen or k in seen:
                     continue
-                seen.add(url)
-                if not verdict(title, location, desc):
-                    new.append((company, title, location, url))
+                seen.update((url, k))
+                if seeded and not verdict(title, location, desc):
+                    new.append((company, title, location, url, k))
         except Exception as e:
             errors.append(f"{name}: {str(e)[:80]}")
-    SEEN.write_text(json.dumps(sorted(seen), indent=0))
+            continue
+        if not seeded:
+            seen.add(f"src:{name}")
+            seeded_now.append(name)
     print(f"{time.strftime('%Y-%m-%d %H:%M')} sources={len(sources)} new={len(new)} seen={len(seen)} errors={len(errors)}")
     for e in errors:
         print("  error", e)
-    if first_run:
-        print("first run: seeded seen.json without notifying")
-        return
+    for name in seeded_now:
+        print("  seeded silently:", name)
     if 0 < len(new) <= 5:
-        for company, title, location, url in new:
-            push(f"New internship: {company}", f"{title}\n{location}", click=url)
+        for company, title, location, url, k in new:
+            if not push(f"New internship: {company}", f"{title}\n{location}", click=url):
+                seen.difference_update((url, k))  # retry next run
     elif new:
-        lines = [f"{c}: {t}" for c, t, _, _ in new[:15]]
-        push(f"{len(new)} new internships", "\n".join(lines) + (f"\n+{len(new) - 15} more" if len(new) > 15 else ""))
+        lines = [f"{c}: {t}" for c, t, *_ in new[:15]]
+        if not push(f"{len(new)} new internships", "\n".join(lines) + (f"\n+{len(new) - 15} more" if len(new) > 15 else "")):
+            for *_, url, k in new:
+                seen.difference_update((url, k))
+    SEEN.write_text(json.dumps(sorted(seen), indent=0))
 
 
 if __name__ == "__main__":
@@ -160,6 +206,20 @@ if __name__ == "__main__":
         assert verdict("SWE Intern", "Remote in USA") == ""
         assert verdict("SWE Intern", "Austin, TX", "We are unable to sponsor visas.") == "sponsorship"
         assert verdict("Machine Learning Intern - Winter 2027", "SF") == "title"
+        assert verdict("SWE Intern", "New York, NY", "race, military or veteran status") == ""
+        assert verdict("SWE Intern", "Austin, TX", "Subject to ITAR.") == "sponsorship"
+        assert verdict("SWE Intern", "Austin, TX", "No security clearance required.") == ""
+        assert verdict("SWE Intern", "Remote - India") == "location"
+        assert verdict("SWE Intern", "Waterloo, ON, CA") == "location"
+        assert verdict("SWE Intern", "On-site - Austin, TX") == ""
+        assert verdict("SWE Intern", "New York, NY; London, UK") == ""
+        assert verdict("SWE Intern", "Costa Rica, San Jose") == "location"
+        assert verdict("SWE Intern", "2 Locations") == ""
+        assert verdict("SWE Intern", "Virtual US") == ""
+        for place in ("Lincoln, NE", "St. Louis, MO", "California", "SF", "LA", "Tulsa, OK"):
+            assert verdict("SWE Intern", place) == "", place
+        assert verdict("Software Engineer Intern (Bachelor's/Master's)", "Seattle, WA") == ""
+        assert key("RTX", "Software Engineering Intern", "Melbourne, FL") == key("RTX", "Software Engineer Intern", "Melbourne, FL")
         print("watch_cloud.py self-check ok")
     else:
         main()

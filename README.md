@@ -17,5 +17,13 @@ they won't sponsor visas or need US citizenship / clearance.
 3. Add companies to `boards.txt` (`greenhouse:stripe`, `lever:palantir`, `ashby:notion`, `smartrecruiters:Visa`,
    `workday:nvidia/wd5/NVIDIAExternalCareerSite`).
 
-`seen.json` remembers what has already been reported. Delete it to re-seed silently on the next run.
+4. External trigger (GitHub drops most `*/10` scheduled runs, so the cron in the workflow is only a backup):
+   - Fine-grained token: Settings → Developer settings → Fine-grained tokens, repo `internship-watch` only,
+     permission **Actions: Read and write**.
+   - [cron-job.org](https://cron-job.org) job, every 10 min: `POST
+     https://api.github.com/repos/omeygun/internship-watch/actions/workflows/watch.yml/dispatches`, headers
+     `Authorization: Bearer <token>`, `Accept: application/vnd.github+json`, body `{"ref":"main"}`. Expect HTTP 204.
+
+`seen.json` remembers what has already been reported. A newly added board is seeded silently on its first run.
+Delete `seen.json` to re-seed everything silently.
 Self-check: `python3 watch_cloud.py --test`.
