@@ -1,17 +1,18 @@
 name: watch
 on:
   schedule:
-    - cron: "3,13,23,33,43,53 * * * *"   # backup only: GitHub drops many scheduled runs, esp. at :00
-  workflow_dispatch:                     # primary: an external cron (cron-job.org) POSTs this every 10 min
+    - cron: "3,13,23,33,43,53 * * * *"   # revives the chain if it ever breaks; GitHub drops most of these
+  workflow_dispatch:                     # the chain: each run dispatches the next one ~10 min later
 permissions:
   contents: write
+  actions: write                         # lets GITHUB_TOKEN dispatch the next run
 concurrency:
-  group: watch
+  group: watch                           # at most 1 running + 1 pending, so a cron run can't start a 2nd chain
   cancel-in-progress: false
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
       - run: python3 watch_cloud.py
@@ -23,3 +24,8 @@ jobs:
           git config user.email "internship-watch@users.noreply.github.com"
           git add seen.json
           git diff --cached --quiet || (git commit -q -m "update seen jobs" && git pull -q --rebase && git push -q)
+      - name: Schedule next run
+        if: always()   # keep the chain alive even if the check failed
+        run: sleep 540 && gh workflow run watch.yml --ref "$GITHUB_REF_NAME"
+        env:
+          GH_TOKEN: ${{ github.token }}
